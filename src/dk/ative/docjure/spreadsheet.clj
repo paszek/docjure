@@ -1,6 +1,7 @@
 (ns dk.ative.docjure.spreadsheet
   (:import
-    (java.io FileOutputStream FileInputStream InputStream OutputStream)
+   (java.io FileOutputStream FileInputStream InputStream OutputStream)
+   (java.time LocalDateTime)
    (java.util Date Calendar)
    (org.apache.poi.xssf.usermodel XSSFWorkbook)
    (org.apache.poi.hssf.usermodel HSSFWorkbook)
@@ -234,26 +235,44 @@
                     (.. format-helper createDataFormat (getFormat format)))
     (.setCellStyle cell date-style)))
 
-(defmulti set-cell! (fn [^Cell cell val] (type val)))
+(def default-date-format "yyyy-mm-dd HH:MM:ss")
 
-(defmethod set-cell! String [^Cell cell val]
+(declare create-cell-style!)
+
+(defmulti set-cell! 
+  (fn [^Cell cell val & [frm]]
+    (type val)))
+
+
+(defmethod set-cell! String [^Cell cell val & [frm]]
   (if (= (.getCellType cell) CellType/FORMULA) (.setCellType cell CellType/STRING))
-  (.setCellValue cell ^String val))
+  (.setCellValue cell ^String val)
+  (when-let [styles frm]
+    (.setCellStyle cell (create-cell-style! (.. cell getSheet getWorkbook) styles))))
 
-(defmethod set-cell! Number [^Cell cell val]
+(defmethod set-cell! Number [^Cell cell val & [frm]]
   (if (= (.getCellType cell) CellType/FORMULA) (.setCellType cell CellType/NUMERIC))
-  (.setCellValue cell (double val)))
+  (.setCellValue cell (double val))
+  (when-let [date-format frm]
+    (.setCellStyle cell (create-date-format (.. cell getSheet getWorkbook) date-format))))
 
-(defmethod set-cell! Boolean [^Cell cell val]
+(defmethod set-cell! Boolean [^Cell cell val & [frm]]
   (if (= (.getCellType cell) CellType/FORMULA) (.setCellType cell CellType/BOOLEAN))
   (.setCellValue cell ^Boolean val))
 
-(defmethod set-cell! Date [^Cell cell val]
+(defmethod set-cell! Date [^Cell cell val & [frm]]
   (if (= (.getCellType cell) CellType/FORMULA) (.setCellType cell CellType/NUMERIC))
   (.setCellValue cell ^Date val)
-  (.setCellStyle cell (create-date-format (.. cell getSheet getWorkbook) "m/d/yy")))
+  (let [date-format (or frm default-date-format)]
+    (.setCellStyle cell (create-date-format (.. cell getSheet getWorkbook) date-format))))
 
-(defmethod set-cell! nil [^Cell cell val]
+(defmethod set-cell! LocalDateTime [^Cell cell val & [frm]]
+  (if (= (.getCellType cell) CellType/FORMULA) (.setCellType cell CellType/NUMERIC))
+  (.setCellValue cell ^LocalDateTime val)
+  (let [date-format (or frm default-date-format)]
+    (.setCellStyle cell (create-date-format (.. cell getSheet getWorkbook) date-format))))
+
+(defmethod set-cell! nil [^Cell cell val & [frm]]
   (let [^String null nil]
     (if (= (.getCellType cell) CellType/FORMULA) (.setCellType cell CellType/BLANK))
     (.setCellValue cell null)))
@@ -285,25 +304,34 @@
      "_x005F$1")
     value))
 
-(defn add-row! [^Sheet sheet values]
+(defn add-row! [^Sheet sheet values & [column-formats]]
   (assert-type sheet Sheet)
   (let [row-num (if (= 0 (.getPhysicalNumberOfRows sheet))
                   0
                   (inc (.getLastRowNum sheet)))
         row (.createRow sheet row-num)]
-    (doseq [[column-index value] (map-indexed #(list %1 %2) values)]
-      (set-cell! (.createCell row column-index) value))
+    (doseq [[column-index cell-data] (map-indexed #(list %1 %2) values)]
+      
+      (let [cell-format (if (map? cell-data)
+                          (:styles cell-data)
+                          (get column-formats column-index))
+            
+            cell-value  (if (map? cell-data)
+                          (:value cell-data)
+                          cell-data)]
+        
+        (set-cell! (.createCell row column-index) cell-value cell-format)))
     row))
 
 (defn add-rows!
   "Add rows to the sheet. The rows is a sequence of row-data, where
    each row-data is a sequence of values for the columns in increasing
    order on that row."
-  [^Sheet sheet rows]
+  [^Sheet sheet rows & [column-formats]]
   (assert-type sheet Sheet)
   (binding [create-date-format (memoize create-date-format)]
     (doseq [row rows]
-      (add-row! sheet row))))
+      (add-row! sheet row column-formats))))
 
 (defn add-sheet!
   "Add a new sheet to the workbook."
@@ -316,25 +344,14 @@
   is a vector of vectors, representing the rows and the cells of the rows.
   Alternate sheet names and data to create multiple sheets.
 
-  (create-workbook \"SheetName1\" [[\"A1\" \"A2\"][\"B1\" \"B2\"]]
-                   \"SheetName2\" [[\"A1\" \"A2\"][\"B1\" \"B2\"]] "
- ([sheet-name data]
-   (let [workbook (XSSFWorkbook.)
-         sheet    (add-sheet! workbook sheet-name)]
-     (add-rows! sheet data)
-     workbook))
-
- ([sheet-name data & name-data-pairs]
-  ;; incomplete pairs should not be allowed
-  {:pre [(even? (count name-data-pairs))]}
-  ;; call single arity version to create workbook
-   (let [workbook (create-workbook sheet-name data)]
-     ;; iterate through pairs adding sheets and rows
-    (doseq [[s-name data] (partition 2 name-data-pairs)]
-      (-> workbook
-          (add-sheet! s-name)
-          (add-rows!  data)))
-    workbook)))
+  (create-workbook \"SheetName1\" [[\"A1\" \"A2\"][\"B1\" \"B2\"]]"
+  
+  [sheet-name data & [column-formats]]
+  (let [workbook (XSSFWorkbook.)
+        sheet    (add-sheet! workbook sheet-name)]
+    (add-rows! sheet data column-formats)
+    ;; TODO map formats to styles
+    workbook))
 
 (defn- add-row-indexed!
   "Add row to the sheet, at a specific row index"
